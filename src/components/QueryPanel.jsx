@@ -73,8 +73,8 @@ export default function QueryPanel({ config, setError }) {
         setSessionId(resp.session_id);
         setMessages((prev) => [...prev, {
           role: "assistant",
-          content: resp.summary || "Query completed.",
-          data: resp.results,
+          content: resp.ai_interpretation || "Query completed.",
+          data: resp.raw_results,
           mode: "ai",
         }]);
       } catch (err) {

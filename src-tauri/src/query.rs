@@ -3,24 +3,26 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+/// What we return to the frontend for run_query (ai_native_index endpoint)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RunQueryResponse {
     pub session_id: String,
-    pub results: Vec<Value>,
-    pub summary: Option<String>,
+    pub ai_interpretation: String,
+    pub raw_results: Vec<Value>,
 }
 
+/// What we return to the frontend for chat_followup
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatResponse {
     pub answer: String,
     pub context_used: bool,
 }
 
+/// What we return to the frontend for search_index
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SearchResponse {
     pub results: Vec<Value>,
     pub count: usize,
-    pub term: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -78,6 +80,18 @@ impl QueryClient {
 
     fn headers_from_adapter(&self, config: &AdapterConfig) -> reqwest::header::HeaderMap {
         self.build_headers(&config.api_key, config.user_hash.as_deref())
+    }
+
+    /// Parse API response, check ok field, return raw JSON value for further extraction
+    fn parse_api_response(body: Value) -> Result<Value, String> {
+        let ok = body.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
+        if !ok {
+            let error = body.get("error")
+                .and_then(|v| v.as_str())
+                .unwrap_or("Unknown server error");
+            return Err(error.to_string());
+        }
+        Ok(body)
     }
 
     // --- Tauri command methods (use AppConfig) ---
@@ -165,7 +179,8 @@ impl QueryClient {
         query: &str,
         session_id: Option<&str>,
     ) -> Result<RunQueryResponse, String> {
-        let url = format!("{}/api/llm-query/run", api_url);
+        // Use ai_native_index endpoint: LLM searches word index, hydrates, interprets
+        let url = format!("{}/api/llm-query/native-index", api_url);
         let mut body = serde_json::json!({ "query": query });
         if let Some(sid) = session_id {
             body["session_id"] = serde_json::json!(sid);
@@ -186,9 +201,24 @@ impl QueryClient {
             return Err(format!("Query failed ({}): {}", status, text));
         }
 
-        resp.json::<RunQueryResponse>()
-            .await
-            .map_err(|e| format!("Failed to parse query response: {}", e))
+        let json: Value = resp.json().await
+            .map_err(|e| format!("Failed to read query response: {}", e))?;
+        let data = Self::parse_api_response(json)?;
+
+        Ok(RunQueryResponse {
+            session_id: data.get("session_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+            ai_interpretation: data.get("ai_interpretation")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+            raw_results: data.get("raw_results")
+                .and_then(|v| v.as_array())
+                .cloned()
+                .unwrap_or_default(),
+        })
     }
 
     async fn chat_followup_internal(
@@ -219,9 +249,19 @@ impl QueryClient {
             return Err(format!("Chat failed ({}): {}", status, text));
         }
 
-        resp.json::<ChatResponse>()
-            .await
-            .map_err(|e| format!("Failed to parse chat response: {}", e))
+        let json: Value = resp.json().await
+            .map_err(|e| format!("Failed to read chat response: {}", e))?;
+        let data = Self::parse_api_response(json)?;
+
+        Ok(ChatResponse {
+            answer: data.get("answer")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+            context_used: data.get("context_used")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
+        })
     }
 
     async fn search_index_internal(
@@ -230,14 +270,14 @@ impl QueryClient {
         headers: &reqwest::header::HeaderMap,
         term: &str,
     ) -> Result<SearchResponse, String> {
+        // Native index search is GET with query param
         let url = format!("{}/api/native-index/search", api_url);
-        let body = serde_json::json!({ "term": term });
 
         let resp = self
             .client
-            .post(&url)
+            .get(&url)
+            .query(&[("term", term)])
             .headers(headers.clone())
-            .json(&body)
             .send()
             .await
             .map_err(|e| format!("Search request failed: {}", e))?;
@@ -248,9 +288,17 @@ impl QueryClient {
             return Err(format!("Search failed ({}): {}", status, text));
         }
 
-        resp.json::<SearchResponse>()
-            .await
-            .map_err(|e| format!("Failed to parse search response: {}", e))
+        let json: Value = resp.json().await
+            .map_err(|e| format!("Failed to read search response: {}", e))?;
+        let data = Self::parse_api_response(json)?;
+
+        let results = data.get("results")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        let count = results.len();
+
+        Ok(SearchResponse { results, count })
     }
 
     async fn mutate_internal(
@@ -283,8 +331,18 @@ impl QueryClient {
             return Err(format!("Mutate failed ({}): {}", status, text));
         }
 
-        resp.json::<MutateResponse>()
-            .await
-            .map_err(|e| format!("Failed to parse mutate response: {}", e))
+        let json: Value = resp.json().await
+            .map_err(|e| format!("Failed to read mutate response: {}", e))?;
+        let data = Self::parse_api_response(json)?;
+
+        Ok(MutateResponse {
+            success: data.get("ok")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
+            message: data.get("message")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
+            data: data.get("data").cloned(),
+        })
     }
 }
