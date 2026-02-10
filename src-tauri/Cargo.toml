@@ -20,6 +20,7 @@ tauri-plugin-log = "2"
 tauri-plugin-shell = "2"
 tauri-plugin-dialog = "2"
 tauri-plugin-notification = "2"
+tauri-plugin-deep-link = "2"
 
 notify = "7"
 reqwest = { version = "0.12", features = ["rustls-tls", "json"] }
@@ -29,3 +30,4 @@ serde_json = "1"
 directories = "6"
 log = "0.4"
 mime_guess = "2"
+url = "2"

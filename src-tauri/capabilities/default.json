@@ -8,7 +8,10 @@
   "permissions": [
     "core:default",
     "dialog:default",
+    "dialog:allow-open",
     "notification:default",
-    "core:event:default"
+    "core:event:default",
+    "deep-link:default",
+    "shell:allow-open"
   ]
 }

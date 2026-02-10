@@ -13,6 +13,7 @@ use tauri::{
     tray::TrayIconBuilder,
     Emitter, Manager, State,
 };
+use tauri_plugin_deep_link::DeepLinkExt;
 use tokio::sync::{mpsc, Mutex};
 
 const MAX_ACTIVITY_LOG: usize = 50;
@@ -61,13 +62,13 @@ async fn save_config(
 async fn select_folder(app: tauri::AppHandle) -> Result<Option<String>, String> {
     use tauri_plugin_dialog::DialogExt;
 
-    let (tx, rx) = std::sync::mpsc::channel();
-    app.dialog().file().pick_folder(move |folder| {
-        let _ = tx.send(folder.map(|f| f.to_string()));
-    });
-
-    rx.recv()
-        .map_err(|e| format!("Dialog cancelled: {}", e))
+    let app_clone = app.clone();
+    tokio::task::spawn_blocking(move || {
+        let folder = app_clone.dialog().file().blocking_pick_folder();
+        folder.map(|f| f.to_string())
+    })
+    .await
+    .map_err(|e| format!("Dialog task failed: {}", e))
 }
 
 #[tauri::command]
@@ -214,11 +215,38 @@ fn count_files(folder: &std::path::Path) -> Result<usize, std::io::Error> {
     Ok(count)
 }
 
+/// Process a deep link URL and emit auth data to the frontend
+fn handle_deep_link_url(app: &tauri::AppHandle, url: &url::Url) {
+    log::info!("Processing deep link: {}", url);
+
+    // exemem://auth/callback?api_key=...&user_hash=...&session_token=...
+    if url.host_str() == Some("auth") {
+        let params: std::collections::HashMap<String, String> =
+            url.query_pairs().into_owned().collect();
+
+        let payload = serde_json::json!({
+            "api_key": params.get("api_key"),
+            "user_hash": params.get("user_hash"),
+            "session_token": params.get("session_token"),
+        });
+
+        log::info!("Deep link auth callback received");
+        let _ = app.emit("deep-link-auth", payload);
+
+        // Bring window to front
+        if let Some(window) = app.get_webview_window("main") {
+            let _ = window.show();
+            let _ = window.set_focus();
+        }
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let config = AppConfig::load().unwrap_or_default();
 
     tauri::Builder::default()
+        .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
@@ -240,6 +268,25 @@ pub fn run() {
                         .build(),
                 )?;
             }
+
+            // Deep link handling
+            #[cfg(any(windows, target_os = "linux"))]
+            {
+                let _ = app.deep_link().register_all();
+            }
+
+            if let Ok(Some(urls)) = app.deep_link().get_current() {
+                for url in &urls {
+                    handle_deep_link_url(app.handle(), url);
+                }
+            }
+
+            let deep_link_handle = app.handle().clone();
+            app.deep_link().on_open_url(move |event| {
+                for url in event.urls() {
+                    handle_deep_link_url(&deep_link_handle, &url);
+                }
+            });
 
             // System tray
             let open_item = MenuItemBuilder::with_id("open", "Open").build(app)?;

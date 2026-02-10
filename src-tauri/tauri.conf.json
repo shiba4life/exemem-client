@@ -3,6 +3,13 @@
   "productName": "Exemem Client",
   "version": "0.1.0",
   "identifier": "ai.exemem.client",
+  "plugins": {
+    "deep-link": {
+      "desktop": {
+        "schemes": ["exemem"]
+      }
+    }
+  },
   "build": {
     "devUrl": "http://localhost:5174",
     "frontendDist": "../dist",

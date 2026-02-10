@@ -2,12 +2,34 @@ use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+const DEV_API_URL: &str = "https://ygyu7ritx8.execute-api.us-west-2.amazonaws.com";
+const PROD_API_URL: &str = "https://jdsx4ixk2i.execute-api.us-east-1.amazonaws.com";
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub enum Environment {
+    Dev,
+    Prod,
+    Custom,
+}
+
+impl Default for Environment {
+    fn default() -> Self {
+        Self::Dev
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
     pub api_base_url: String,
     pub api_key: String,
     pub watched_folder: Option<PathBuf>,
     pub auto_ingest: bool,
+    #[serde(default)]
+    pub environment: Environment,
+    #[serde(default)]
+    pub session_token: Option<String>,
+    #[serde(default)]
+    pub user_hash: Option<String>,
 }
 
 impl Default for AppConfig {
@@ -17,6 +39,9 @@ impl Default for AppConfig {
             api_key: String::new(),
             watched_folder: None,
             auto_ingest: true,
+            environment: Environment::default(),
+            session_token: None,
+            user_hash: None,
         }
     }
 }
@@ -51,8 +76,16 @@ impl AppConfig {
             .map_err(|e| format!("Failed to write config: {}", e))
     }
 
+    pub fn api_url(&self) -> &str {
+        match self.environment {
+            Environment::Dev => DEV_API_URL,
+            Environment::Prod => PROD_API_URL,
+            Environment::Custom => &self.api_base_url,
+        }
+    }
+
     pub fn is_configured(&self) -> bool {
-        !self.api_base_url.is_empty()
+        !self.api_url().is_empty()
             && !self.api_key.is_empty()
             && self.watched_folder.is_some()
     }

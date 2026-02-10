@@ -126,7 +126,7 @@ impl Uploader {
         config: &AppConfig,
         filename: &str,
     ) -> Result<PresignedUrlResponse, String> {
-        let url = format!("{}/ingestion/upload-url", config.api_base_url);
+        let url = format!("{}/ingestion/upload-url", config.api_url());
         let resp = self
             .client
             .post(&url)
@@ -176,7 +176,7 @@ impl Uploader {
         config: &AppConfig,
         s3_key: &str,
     ) -> Result<IngestResponse, String> {
-        let url = format!("{}/ingestion/ingest-s3", config.api_base_url);
+        let url = format!("{}/ingestion/ingest-s3", config.api_url());
         let resp = self
             .client
             .post(&url)

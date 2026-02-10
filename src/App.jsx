@@ -1,6 +1,21 @@
 import { useState, useEffect, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { onOpenUrl } from "@tauri-apps/plugin-deep-link";
+import { open } from "@tauri-apps/plugin-shell";
+import { open as openDialog } from "@tauri-apps/plugin-dialog";
+
+const ENV_URLS = {
+  Dev: "https://ygyu7ritx8.execute-api.us-west-2.amazonaws.com",
+  Prod: "https://jdsx4ixk2i.execute-api.us-east-1.amazonaws.com",
+};
+
+// Desktop auth page URLs per environment
+// The auth page must be on the same origin as the passkey RP ID
+const AUTH_PAGE_URLS = {
+  Dev: "https://d3t6377alb85xe.cloudfront.net/desktop-auth",
+  Prod: "https://exemem.com/desktop-auth",
+};
 
 function StatusBadge({ watching }) {
   return (
@@ -44,6 +59,9 @@ export default function App() {
     api_key: "",
     watched_folder: null,
     auto_ingest: true,
+    environment: "Dev",
+    session_token: null,
+    user_hash: null,
   });
   const [syncStatus, setSyncStatus] = useState({
     watching: false,
@@ -54,6 +72,14 @@ export default function App() {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState(null);
   const [success, setSuccess] = useState(null);
+  const [authLoading, setAuthLoading] = useState(false);
+
+  const isAuthenticated = !!(config.session_token && config.user_hash && config.api_key);
+
+  const apiBaseUrl =
+    config.environment === "Custom"
+      ? config.api_base_url
+      : ENV_URLS[config.environment] || ENV_URLS.Dev;
 
   const loadState = useCallback(async () => {
     try {
@@ -66,6 +92,24 @@ export default function App() {
     } catch (err) {
       console.error("Failed to load state:", err);
     }
+  }, []);
+
+  // Handle auth data from deep link callback
+  const handleAuthCallback = useCallback(async (data) => {
+    if (!data.api_key || !data.user_hash) return;
+
+    setConfig((prev) => {
+      const newConfig = {
+        ...prev,
+        api_key: data.api_key,
+        user_hash: data.user_hash,
+        session_token: data.session_token || null,
+      };
+      invoke("save_config", { newConfig }).catch((err) => setError(String(err)));
+      return newConfig;
+    });
+    setSuccess("Signed in and API key saved.");
+    setTimeout(() => setSuccess(null), 3000);
   }, []);
 
   useEffect(() => {
@@ -92,19 +136,55 @@ export default function App() {
       toggleWatching();
     });
 
+    // Listen for deep link auth callbacks (emitted from Rust)
+    const unlistenDeepLink = listen("deep-link-auth", (event) => {
+      handleAuthCallback(event.payload);
+    });
+
+    // Also listen directly via the JS deep-link plugin
+    // This may fail in dev mode (deep links only work in built .app)
+    let unlistenDeepLinkJs;
+    onOpenUrl((urls) => {
+      for (const urlStr of urls) {
+        try {
+          const url = new URL(urlStr);
+          if (url.host === "auth") {
+            handleAuthCallback({
+              api_key: url.searchParams.get("api_key"),
+              user_hash: url.searchParams.get("user_hash"),
+              session_token: url.searchParams.get("session_token"),
+            });
+          }
+        } catch (e) {
+          console.error("Failed to parse deep link:", e);
+        }
+      }
+    }).then((fn) => {
+      unlistenDeepLinkJs = fn;
+    }).catch((e) => {
+      console.warn("Deep link listener not available:", e);
+    });
+
     return () => {
       unlistenActivity.then((f) => f());
       unlistenStatus.then((f) => f());
       unlistenTray.then((f) => f());
+      unlistenDeepLink.then((f) => f());
+      if (unlistenDeepLinkJs) unlistenDeepLinkJs();
     };
-  }, [loadState]);
+  }, [loadState, handleAuthCallback]);
+
+  const saveConfig = async (newConfig) => {
+    await invoke("save_config", { newConfig });
+    setConfig(newConfig);
+  };
 
   const handleSave = async () => {
     setSaving(true);
     setError(null);
     setSuccess(null);
     try {
-      await invoke("save_config", { newConfig: config });
+      await saveConfig(config);
       setSuccess("Configuration saved.");
       setTimeout(() => setSuccess(null), 3000);
     } catch (err) {
@@ -115,13 +195,16 @@ export default function App() {
   };
 
   const handleSelectFolder = async () => {
+    setError(null);
     try {
-      const folder = await invoke("select_folder");
+      const folder = await openDialog({ directory: true, multiple: false });
+      console.log("Dialog result:", folder);
       if (folder) {
         setConfig((prev) => ({ ...prev, watched_folder: folder }));
       }
     } catch (err) {
       console.error("Folder selection error:", err);
+      setError("Folder selection failed: " + String(err));
     }
   };
 
@@ -138,6 +221,40 @@ export default function App() {
     } catch (err) {
       setError(String(err));
     }
+  };
+
+  const handleSignIn = async () => {
+    setAuthLoading(true);
+    setError(null);
+    try {
+      // Open the desktop auth page in the system browser
+      const authPageUrl =
+        config.environment === "Custom"
+          ? `${apiBaseUrl}/desktop-auth`
+          : AUTH_PAGE_URLS[config.environment] || AUTH_PAGE_URLS.Dev;
+      const authUrl = `${authPageUrl}?api=${encodeURIComponent(apiBaseUrl)}`;
+      await open(authUrl);
+      setSuccess(
+        "Browser opened. Complete sign-in there, then click \"Open Exemem Client\" to return.",
+      );
+      setTimeout(() => setSuccess(null), 10000);
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setAuthLoading(false);
+    }
+  };
+
+  const handleSignOut = async () => {
+    const newConfig = {
+      ...config,
+      api_key: "",
+      session_token: null,
+      user_hash: null,
+    };
+    await saveConfig(newConfig);
+    setSuccess("Signed out.");
+    setTimeout(() => setSuccess(null), 3000);
   };
 
   const formatTime = (timestamp) => {
@@ -175,35 +292,101 @@ export default function App() {
 
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-1">
-              API URL
+              Environment
             </label>
-            <input
-              type="text"
-              className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-primary focus:border-primary"
-              placeholder="https://your-api.example.com/api"
-              value={config.api_base_url}
+            <select
+              className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-primary focus:border-primary bg-white"
+              value={config.environment}
               onChange={(e) =>
                 setConfig((prev) => ({
                   ...prev,
-                  api_base_url: e.target.value,
+                  environment: e.target.value,
                 }))
               }
-            />
+            >
+              <option value="Dev">Dev</option>
+              <option value="Prod">Prod</option>
+              <option value="Custom">Custom</option>
+            </select>
+            {config.environment === "Custom" ? (
+              <input
+                type="text"
+                className="w-full mt-2 px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-primary focus:border-primary"
+                placeholder="https://your-api.example.com"
+                value={config.api_base_url}
+                onChange={(e) =>
+                  setConfig((prev) => ({
+                    ...prev,
+                    api_base_url: e.target.value,
+                  }))
+                }
+              />
+            ) : (
+              <p className="mt-1 text-xs text-gray-500">{apiBaseUrl}</p>
+            )}
           </div>
 
+          {/* Authentication */}
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-1">
-              API Key
+              Authentication
             </label>
-            <input
-              type="password"
-              className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-primary focus:border-primary"
-              placeholder="Enter your API key"
-              value={config.api_key}
-              onChange={(e) =>
-                setConfig((prev) => ({ ...prev, api_key: e.target.value }))
-              }
-            />
+            {isAuthenticated ? (
+              <div className="space-y-2">
+                <div className="flex items-center justify-between px-3 py-2 bg-green-50 border border-green-200 rounded-lg">
+                  <div className="flex items-center gap-2">
+                    <span className="w-2 h-2 rounded-full bg-green-500" />
+                    <span className="text-sm text-green-700">
+                      Signed in as {config.user_hash.slice(0, 12)}...
+                    </span>
+                  </div>
+                  <button
+                    onClick={handleSignOut}
+                    className="text-xs text-gray-500 hover:text-red-600 transition-colors"
+                  >
+                    Sign Out
+                  </button>
+                </div>
+                <div>
+                  <label className="block text-xs text-gray-500 mb-1">
+                    API Key
+                  </label>
+                  <input
+                    type="password"
+                    className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm bg-gray-50"
+                    value={config.api_key}
+                    readOnly
+                  />
+                </div>
+              </div>
+            ) : (
+              <div className="space-y-2">
+                <button
+                  onClick={handleSignIn}
+                  disabled={authLoading}
+                  className="w-full px-4 py-2 bg-indigo-600 text-white rounded-lg text-sm font-medium hover:bg-indigo-700 transition-colors disabled:opacity-50"
+                >
+                  {authLoading ? "Opening browser..." : "Sign In with Passkey"}
+                </button>
+                <div>
+                  <label className="block text-xs text-gray-500 mb-1">
+                    Or enter API key manually
+                  </label>
+                  <input
+                    type="password"
+                    className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-primary focus:border-primary"
+                    placeholder="Enter your API key"
+                    value={config.api_key}
+                    onChange={(e) =>
+                      setConfig((prev) => ({
+                        ...prev,
+                        api_key: e.target.value,
+                      }))
+                    }
+                  />
+                </div>
+              </div>
+            )}
           </div>
 
           <div>
@@ -213,10 +396,15 @@ export default function App() {
             <div className="flex gap-2">
               <input
                 type="text"
-                className="flex-1 px-3 py-2 border border-gray-300 rounded-lg text-sm bg-gray-50"
-                placeholder="Select a folder..."
+                className="flex-1 px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-primary focus:border-primary"
+                placeholder="/path/to/folder"
                 value={config.watched_folder || ""}
-                readOnly
+                onChange={(e) =>
+                  setConfig((prev) => ({
+                    ...prev,
+                    watched_folder: e.target.value || null,
+                  }))
+                }
               />
               <button
                 onClick={handleSelectFolder}
