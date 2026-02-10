@@ -2,63 +2,20 @@ import { useState, useEffect, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { onOpenUrl } from "@tauri-apps/plugin-deep-link";
-import { open } from "@tauri-apps/plugin-shell";
-import { open as openDialog } from "@tauri-apps/plugin-dialog";
 
-const ENV_URLS = {
-  Dev: "https://ygyu7ritx8.execute-api.us-west-2.amazonaws.com",
-  Prod: "https://jdsx4ixk2i.execute-api.us-east-1.amazonaws.com",
-};
-
-// Desktop auth page URLs per environment
-// The auth page must be on the same origin as the passkey RP ID
-const AUTH_PAGE_URLS = {
-  Dev: "https://d3t6377alb85xe.cloudfront.net/desktop-auth",
-  Prod: "https://exemem.com/desktop-auth",
-};
-
-function StatusBadge({ watching }) {
-  return (
-    <span
-      className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium ${
-        watching
-          ? "bg-green-100 text-green-700"
-          : "bg-gray-100 text-gray-600"
-      }`}
-    >
-      <span
-        className={`w-2 h-2 rounded-full ${
-          watching ? "bg-green-500 animate-pulse" : "bg-gray-400"
-        }`}
-      />
-      {watching ? "Watching" : "Paused"}
-    </span>
-  );
-}
-
-function StatusIcon({ status }) {
-  switch (status) {
-    case "Uploading":
-      return <span className="text-blue-500">...</span>;
-    case "Uploaded":
-      return <span className="text-blue-600">^</span>;
-    case "Ingesting":
-      return <span className="text-yellow-500">~</span>;
-    case "Done":
-      return <span className="text-green-600">ok</span>;
-    case "Error":
-      return <span className="text-red-500">!</span>;
-    default:
-      return <span className="text-gray-400">?</span>;
-  }
-}
+import Sidebar from "./components/Sidebar";
+import SettingsPanel from "./components/SettingsPanel";
+import SyncPanel from "./components/SyncPanel";
+import QueryPanel from "./components/QueryPanel";
 
 export default function App() {
+  const [activeView, setActiveView] = useState("settings");
   const [config, setConfig] = useState({
     api_base_url: "",
     api_key: "",
     watched_folder: null,
     auto_ingest: true,
+    auto_approve_watched: true,
     environment: "Dev",
     session_token: null,
     user_hash: null,
@@ -69,17 +26,8 @@ export default function App() {
     file_count: 0,
     recent_activity: [],
   });
-  const [saving, setSaving] = useState(false);
   const [error, setError] = useState(null);
   const [success, setSuccess] = useState(null);
-  const [authLoading, setAuthLoading] = useState(false);
-
-  const isAuthenticated = !!(config.session_token && config.user_hash && config.api_key);
-
-  const apiBaseUrl =
-    config.environment === "Custom"
-      ? config.api_base_url
-      : ENV_URLS[config.environment] || ENV_URLS.Dev;
 
   const loadState = useCallback(async () => {
     try {
@@ -89,15 +37,16 @@ export default function App() {
       ]);
       setConfig(cfg);
       setSyncStatus(status);
+      if (status.watching) {
+        setActiveView("sync");
+      }
     } catch (err) {
       console.error("Failed to load state:", err);
     }
   }, []);
 
-  // Handle auth data from deep link callback
   const handleAuthCallback = useCallback(async (data) => {
     if (!data.api_key || !data.user_hash) return;
-
     setConfig((prev) => {
       const newConfig = {
         ...prev,
@@ -122,6 +71,7 @@ export default function App() {
           status: event.payload.status,
           error: event.payload.error,
           timestamp: String(Math.floor(Date.now() / 1000)),
+          category: event.payload.category || null,
         };
         const updated = [entry, ...prev.recent_activity].slice(0, 50);
         return { ...prev, recent_activity: updated };
@@ -130,19 +80,28 @@ export default function App() {
 
     const unlistenStatus = listen("sync-status-changed", (event) => {
       setSyncStatus((prev) => ({ ...prev, watching: event.payload }));
+      if (event.payload) setActiveView("sync");
     });
 
-    const unlistenTray = listen("tray-toggle-watching", () => {
-      toggleWatching();
+    const unlistenTray = listen("tray-toggle-watching", async () => {
+      try {
+        const status = await invoke("get_sync_status");
+        if (status.watching) {
+          await invoke("stop_watching");
+        } else {
+          await invoke("start_watching");
+        }
+        const newStatus = await invoke("get_sync_status");
+        setSyncStatus(newStatus);
+      } catch (err) {
+        setError(String(err));
+      }
     });
 
-    // Listen for deep link auth callbacks (emitted from Rust)
     const unlistenDeepLink = listen("deep-link-auth", (event) => {
       handleAuthCallback(event.payload);
     });
 
-    // Also listen directly via the JS deep-link plugin
-    // This may fail in dev mode (deep links only work in built .app)
     let unlistenDeepLinkJs;
     onOpenUrl((urls) => {
       for (const urlStr of urls) {
@@ -179,327 +138,62 @@ export default function App() {
     setConfig(newConfig);
   };
 
-  const handleSave = async () => {
-    setSaving(true);
-    setError(null);
-    setSuccess(null);
-    try {
-      await saveConfig(config);
-      setSuccess("Configuration saved.");
-      setTimeout(() => setSuccess(null), 3000);
-    } catch (err) {
-      setError(String(err));
-    } finally {
-      setSaving(false);
-    }
-  };
-
-  const handleSelectFolder = async () => {
-    setError(null);
-    try {
-      const folder = await openDialog({ directory: true, multiple: false });
-      console.log("Dialog result:", folder);
-      if (folder) {
-        setConfig((prev) => ({ ...prev, watched_folder: folder }));
-      }
-    } catch (err) {
-      console.error("Folder selection error:", err);
-      setError("Folder selection failed: " + String(err));
-    }
-  };
-
-  const toggleWatching = async () => {
-    setError(null);
-    try {
-      if (syncStatus.watching) {
-        await invoke("stop_watching");
-      } else {
-        await invoke("start_watching");
-      }
-      const status = await invoke("get_sync_status");
-      setSyncStatus(status);
-    } catch (err) {
-      setError(String(err));
-    }
-  };
-
-  const handleSignIn = async () => {
-    setAuthLoading(true);
-    setError(null);
-    try {
-      // Open the desktop auth page in the system browser
-      const authPageUrl =
-        config.environment === "Custom"
-          ? `${apiBaseUrl}/desktop-auth`
-          : AUTH_PAGE_URLS[config.environment] || AUTH_PAGE_URLS.Dev;
-      const authUrl = `${authPageUrl}?api=${encodeURIComponent(apiBaseUrl)}`;
-      await open(authUrl);
-      setSuccess(
-        "Browser opened. Complete sign-in there, then click \"Open Exemem Client\" to return.",
-      );
-      setTimeout(() => setSuccess(null), 10000);
-    } catch (err) {
-      setError(String(err));
-    } finally {
-      setAuthLoading(false);
-    }
-  };
-
-  const handleSignOut = async () => {
-    const newConfig = {
-      ...config,
-      api_key: "",
-      session_token: null,
-      user_hash: null,
-    };
-    await saveConfig(newConfig);
-    setSuccess("Signed out.");
-    setTimeout(() => setSuccess(null), 3000);
-  };
-
-  const formatTime = (timestamp) => {
-    if (!timestamp) return "";
-    const date = new Date(Number(timestamp) * 1000);
-    return date.toLocaleTimeString();
+  const handleScanAndWatch = () => {
+    setActiveView("sync");
   };
 
   return (
-    <div className="min-h-screen bg-gray-50 p-6">
-      <div className="max-w-lg mx-auto space-y-6">
-        {/* Header */}
-        <div className="flex items-center justify-between">
-          <h1 className="text-xl font-bold text-gray-900">Exemem Client</h1>
-          <StatusBadge watching={syncStatus.watching} />
-        </div>
+    <div className="app-layout">
+      <Sidebar activeView={activeView} onViewChange={setActiveView} />
 
-        {/* Alerts */}
-        {error && (
-          <div className="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-lg text-sm">
-            {error}
-          </div>
-        )}
-        {success && (
-          <div className="bg-green-50 border border-green-200 text-green-700 px-4 py-3 rounded-lg text-sm">
-            {success}
-          </div>
-        )}
-
-        {/* Settings */}
-        <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-5 space-y-4">
-          <h2 className="text-sm font-semibold text-gray-700 uppercase tracking-wide">
-            Settings
-          </h2>
-
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">
-              Environment
-            </label>
-            <select
-              className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-primary focus:border-primary bg-white"
-              value={config.environment}
-              onChange={(e) =>
-                setConfig((prev) => ({
-                  ...prev,
-                  environment: e.target.value,
-                }))
-              }
-            >
-              <option value="Dev">Dev</option>
-              <option value="Prod">Prod</option>
-              <option value="Custom">Custom</option>
-            </select>
-            {config.environment === "Custom" ? (
-              <input
-                type="text"
-                className="w-full mt-2 px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-primary focus:border-primary"
-                placeholder="https://your-api.example.com"
-                value={config.api_base_url}
-                onChange={(e) =>
-                  setConfig((prev) => ({
-                    ...prev,
-                    api_base_url: e.target.value,
-                  }))
-                }
-              />
-            ) : (
-              <p className="mt-1 text-xs text-gray-500">{apiBaseUrl}</p>
-            )}
-          </div>
-
-          {/* Authentication */}
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">
-              Authentication
-            </label>
-            {isAuthenticated ? (
-              <div className="space-y-2">
-                <div className="flex items-center justify-between px-3 py-2 bg-green-50 border border-green-200 rounded-lg">
-                  <div className="flex items-center gap-2">
-                    <span className="w-2 h-2 rounded-full bg-green-500" />
-                    <span className="text-sm text-green-700">
-                      Signed in as {config.user_hash.slice(0, 12)}...
-                    </span>
-                  </div>
-                  <button
-                    onClick={handleSignOut}
-                    className="text-xs text-gray-500 hover:text-red-600 transition-colors"
-                  >
-                    Sign Out
-                  </button>
-                </div>
-                <div>
-                  <label className="block text-xs text-gray-500 mb-1">
-                    API Key
-                  </label>
-                  <input
-                    type="password"
-                    className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm bg-gray-50"
-                    value={config.api_key}
-                    readOnly
-                  />
-                </div>
-              </div>
-            ) : (
-              <div className="space-y-2">
-                <button
-                  onClick={handleSignIn}
-                  disabled={authLoading}
-                  className="w-full px-4 py-2 bg-indigo-600 text-white rounded-lg text-sm font-medium hover:bg-indigo-700 transition-colors disabled:opacity-50"
-                >
-                  {authLoading ? "Opening browser..." : "Sign In with Passkey"}
-                </button>
-                <div>
-                  <label className="block text-xs text-gray-500 mb-1">
-                    Or enter API key manually
-                  </label>
-                  <input
-                    type="password"
-                    className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-primary focus:border-primary"
-                    placeholder="Enter your API key"
-                    value={config.api_key}
-                    onChange={(e) =>
-                      setConfig((prev) => ({
-                        ...prev,
-                        api_key: e.target.value,
-                      }))
-                    }
-                  />
-                </div>
-              </div>
-            )}
-          </div>
-
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">
-              Watched Folder
-            </label>
-            <div className="flex gap-2">
-              <input
-                type="text"
-                className="flex-1 px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-primary focus:border-primary"
-                placeholder="/path/to/folder"
-                value={config.watched_folder || ""}
-                onChange={(e) =>
-                  setConfig((prev) => ({
-                    ...prev,
-                    watched_folder: e.target.value || null,
-                  }))
-                }
-              />
-              <button
-                onClick={handleSelectFolder}
-                className="px-4 py-2 bg-gray-100 text-gray-700 rounded-lg text-sm font-medium hover:bg-gray-200 transition-colors"
-              >
-                Browse
-              </button>
-            </div>
-          </div>
-
+      <div className="content-area">
+        <div className="max-w-2xl mx-auto space-y-4">
+          {/* Header */}
           <div className="flex items-center justify-between">
-            <label className="text-sm font-medium text-gray-700">
-              Auto-ingest after upload
-            </label>
-            <button
-              onClick={() =>
-                setConfig((prev) => ({
-                  ...prev,
-                  auto_ingest: !prev.auto_ingest,
-                }))
-              }
-              className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
-                config.auto_ingest ? "bg-primary" : "bg-gray-300"
-              }`}
-            >
-              <span
-                className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
-                  config.auto_ingest ? "translate-x-6" : "translate-x-1"
-                }`}
-              />
-            </button>
+            <h1 className="text-xl font-bold text-gray-900">Exemem Client</h1>
           </div>
 
-          <div className="flex gap-2 pt-2">
-            <button
-              onClick={handleSave}
-              disabled={saving}
-              className="flex-1 px-4 py-2 bg-primary text-white rounded-lg text-sm font-medium hover:bg-secondary transition-colors disabled:opacity-50"
-            >
-              {saving ? "Saving..." : "Save Settings"}
-            </button>
-            <button
-              onClick={toggleWatching}
-              className={`flex-1 px-4 py-2 rounded-lg text-sm font-medium transition-colors ${
-                syncStatus.watching
-                  ? "bg-red-50 text-red-700 hover:bg-red-100"
-                  : "bg-green-50 text-green-700 hover:bg-green-100"
-              }`}
-            >
-              {syncStatus.watching ? "Stop Watching" : "Start Watching"}
-            </button>
-          </div>
-        </div>
-
-        {/* Status */}
-        <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-5 space-y-4">
-          <div className="flex items-center justify-between">
-            <h2 className="text-sm font-semibold text-gray-700 uppercase tracking-wide">
-              Activity
-            </h2>
-            {syncStatus.folder && (
-              <span className="text-xs text-gray-500">
-                {syncStatus.file_count} files in folder
-              </span>
-            )}
-          </div>
-
-          {syncStatus.recent_activity.length === 0 ? (
-            <p className="text-sm text-gray-400 text-center py-6">
-              No activity yet. Start watching a folder to see uploads here.
-            </p>
-          ) : (
-            <div className="space-y-2 max-h-80 overflow-y-auto">
-              {syncStatus.recent_activity.map((entry, i) => (
-                <div
-                  key={`${entry.filename}-${entry.timestamp}-${i}`}
-                  className="flex items-center gap-3 px-3 py-2 bg-gray-50 rounded-lg"
-                >
-                  <StatusIcon status={entry.status} />
-                  <div className="flex-1 min-w-0">
-                    <p className="text-sm font-medium text-gray-800 truncate">
-                      {entry.filename}
-                    </p>
-                    {entry.error && (
-                      <p className="text-xs text-red-500 truncate">
-                        {entry.error}
-                      </p>
-                    )}
-                  </div>
-                  <span className="text-xs text-gray-400 whitespace-nowrap">
-                    {formatTime(entry.timestamp)}
-                  </span>
-                </div>
-              ))}
+          {/* Alerts */}
+          {error && (
+            <div className="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-lg text-sm">
+              {error}
+              <button onClick={() => setError(null)} className="float-right text-red-400 hover:text-red-600 ml-2">x</button>
             </div>
+          )}
+          {success && (
+            <div className="bg-green-50 border border-green-200 text-green-700 px-4 py-3 rounded-lg text-sm">
+              {success}
+            </div>
+          )}
+
+          {/* View Router */}
+          {activeView === "settings" && (
+            <SettingsPanel
+              config={config}
+              setConfig={setConfig}
+              saveConfig={saveConfig}
+              setError={setError}
+              setSuccess={setSuccess}
+              onScanAndWatch={handleScanAndWatch}
+            />
+          )}
+
+          {activeView === "sync" && (
+            <SyncPanel
+              config={config}
+              saveConfig={saveConfig}
+              setError={setError}
+              setSuccess={setSuccess}
+              syncStatus={syncStatus}
+              setSyncStatus={setSyncStatus}
+            />
+          )}
+
+          {activeView === "query" && (
+            <QueryPanel
+              config={config}
+              setError={setError}
+            />
           )}
         </div>
       </div>

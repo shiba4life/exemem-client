@@ -6,6 +6,7 @@ authors = ["Tom Tang <tom@datafold.ai>"]
 license = "MIT OR Apache-2.0"
 edition = "2021"
 rust-version = "1.77.2"
+default-run = "exemem-client"
 
 [lib]
 name = "exemem_client_lib"
@@ -31,3 +32,9 @@ directories = "6"
 log = "0.4"
 mime_guess = "2"
 url = "2"
+uuid = { version = "1", features = ["v4"] }
+clap = { version = "4", features = ["derive"] }
+
+[[bin]]
+name = "exemem-cli"
+path = "src/bin/exemem-cli.rs"

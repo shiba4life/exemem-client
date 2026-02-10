@@ -5,6 +5,10 @@ use std::path::PathBuf;
 const DEV_API_URL: &str = "https://ygyu7ritx8.execute-api.us-west-2.amazonaws.com";
 const PROD_API_URL: &str = "https://jdsx4ixk2i.execute-api.us-east-1.amazonaws.com";
 
+fn default_true() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum Environment {
     Dev,
@@ -24,6 +28,8 @@ pub struct AppConfig {
     pub api_key: String,
     pub watched_folder: Option<PathBuf>,
     pub auto_ingest: bool,
+    #[serde(default = "default_true")]
+    pub auto_approve_watched: bool,
     #[serde(default)]
     pub environment: Environment,
     #[serde(default)]
@@ -39,6 +45,7 @@ impl Default for AppConfig {
             api_key: String::new(),
             watched_folder: None,
             auto_ingest: true,
+            auto_approve_watched: true,
             environment: Environment::default(),
             session_token: None,
             user_hash: None,

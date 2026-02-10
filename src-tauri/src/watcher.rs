@@ -6,7 +6,7 @@ use tokio::sync::mpsc;
 
 const DEBOUNCE_MS: u64 = 500;
 
-const SUPPORTED_EXTENSIONS: &[&str] = &[
+pub const SUPPORTED_EXTENSIONS: &[&str] = &[
     "json", "csv", "txt", "md", "js", "ts", "jsx", "tsx", "pdf", "png", "jpg", "jpeg", "gif",
     "svg", "html", "xml", "yaml", "yml", "toml", "log", "doc", "docx", "xls", "xlsx", "ppt",
     "pptx", "rtf",
@@ -54,7 +54,7 @@ impl FolderWatcher {
     }
 }
 
-fn is_supported(path: &std::path::Path) -> bool {
+pub fn is_supported(path: &std::path::Path) -> bool {
     path.extension()
         .and_then(|ext| ext.to_str())
         .map(|ext| SUPPORTED_EXTENSIONS.contains(&ext.to_lowercase().as_str()))
