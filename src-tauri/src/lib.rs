@@ -1,6 +1,7 @@
 mod config;
 pub mod query;
 mod scanner;
+pub mod storage;
 mod uploader;
 mod watcher;
 

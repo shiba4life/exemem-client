@@ -34,6 +34,9 @@ mime_guess = "2"
 url = "2"
 uuid = { version = "1", features = ["v4"] }
 clap = { version = "4", features = ["derive"] }
+fold_db = { path = "../../fold_db" }
+async-trait = "0.1"
+base64 = "0.21"
 
 [[bin]]
 name = "exemem-cli"
