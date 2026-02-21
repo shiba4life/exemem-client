@@ -5,8 +5,9 @@ node_modules/
 dist/
 
 # Rust
-src-tauri/target/
+target/
 src-tauri/gen/
+Cargo.lock
 
 # Environment
 .env
